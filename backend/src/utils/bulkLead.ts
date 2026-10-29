@@ -1,6 +1,6 @@
 import { isValidCountryCode, normalizeCountryCode } from './countryCodes'
 import {
-  isValidPhoneNumber,
+  normalizePhoneNumber,
   MAX_YEARS_AT_COMPANY,
   normalizeLinkedinUrl,
   parseYearsAtCompany,
@@ -28,7 +28,8 @@ const optionalText = (value: unknown): string | null =>
   typeof value === 'string' && value.trim() ? value.trim() : null
 
 // Validates and normalizes one lead from a bulk import. Optional fields may be missing, null or empty, but
-// when present they must be valid, otherwise the whole lead is rejected.
+// when present they must be valid, otherwise the whole lead is rejected. The phone is the exception: an invalid
+// one is dropped and the lead is still imported.
 export const parseBulkLead = (raw: unknown): ParsedBulkLead => {
   if (!raw || typeof raw !== 'object') return { errors: ['Lead must be an object'] }
   const lead = raw as Record<string, unknown>
@@ -51,10 +52,9 @@ export const parseBulkLead = (raw: unknown): ParsedBulkLead => {
     errors.push('countryCode must be a valid ISO 3166-1 alpha-2 code')
   }
 
-  const phoneNumber = optionalText(lead.phoneNumber)
-  if (phoneNumber && !isValidPhoneNumber(phoneNumber)) {
-    errors.push('phoneNumber is not a valid phone number')
-  }
+  // An invalid phone is discarded (the lead is imported without it) instead of rejecting the whole lead.
+  const rawPhoneNumber = optionalText(lead.phoneNumber)
+  const phoneNumber = rawPhoneNumber ? normalizePhoneNumber(rawPhoneNumber) : null
 
   const hasYears = !isBlank(
     typeof lead.yearsAtCompany === 'string' ? lead.yearsAtCompany.trim() : lead.yearsAtCompany

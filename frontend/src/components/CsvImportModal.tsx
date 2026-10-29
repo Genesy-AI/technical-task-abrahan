@@ -297,7 +297,7 @@ export const CsvImportModal: FC<CsvImportModalProps> = ({ isOpen, onClose }) => 
                         LinkedIn
                       </th>
                       <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">
-                        Errors
+                        Issues
                       </th>
                     </tr>
                   </thead>
@@ -331,7 +331,13 @@ export const CsvImportModal: FC<CsvImportModalProps> = ({ isOpen, onClose }) => 
                         >
                           {lead.linkedinUrl || '-'}
                         </td>
-                        <td className="px-3 py-2 text-sm text-red-600">{lead.errors.join(', ') || '-'}</td>
+                        <td className="px-3 py-2 text-sm">
+                          {lead.errors.length === 0 && lead.warnings.length === 0 && '-'}
+                          {lead.errors.length > 0 && <div className="text-red-600">{lead.errors.join(', ')}</div>}
+                          {lead.warnings.length > 0 && (
+                            <div className="text-amber-600">{lead.warnings.join(', ')}</div>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

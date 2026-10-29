@@ -1,7 +1,7 @@
 import Papa from 'papaparse'
 import { isValidCountryCode, normalizeCountryCode } from './countryCodes'
 import {
-  isValidPhoneNumber,
+  normalizePhoneNumber,
   MAX_YEARS_AT_COMPANY,
   normalizeLinkedinUrl,
   parseYearsAtCompany,
@@ -19,6 +19,8 @@ export interface CsvLead {
   linkedinUrl?: string
   isValid: boolean
   errors: string[]
+  // Problems that do not block the import, e.g. an invalid phone that was dropped.
+  warnings: string[]
   rowIndex: number
 }
 
@@ -119,8 +121,13 @@ export const parseCsv = (content: string): CsvLead[] => {
     if (lead.countryCode && !isValidCountryCode(lead.countryCode)) {
       errors.push(`Invalid country code "${lead.countryCode}" (expected ISO 3166-1 alpha-2, e.g. US)`)
     }
-    if (lead.phoneNumber && !isValidPhoneNumber(lead.phoneNumber)) {
-      errors.push(`Invalid phone number "${lead.phoneNumber}"`)
+    const warnings: string[] = []
+    if (lead.phoneNumber) {
+      const phoneNumber = normalizePhoneNumber(lead.phoneNumber)
+      if (phoneNumber === null) {
+        warnings.push(`Phone "${lead.phoneNumber}" discarded (invalid format)`)
+      }
+      lead.phoneNumber = phoneNumber ?? undefined
     }
     if (rawYearsAtCompany) {
       const years = parseYearsAtCompany(rawYearsAtCompany)
@@ -148,6 +155,7 @@ export const parseCsv = (content: string): CsvLead[] => {
       email: lead.email || '',
       isValid: errors.length === 0,
       errors,
+      warnings,
     } as CsvLead)
   })
 

@@ -1,18 +1,29 @@
 // Validation and normalization for optional lead fields.
 // Keep in sync with backend/src/utils/leadFields.ts
 
-// Leads come from many countries and sources, so phone numbers are not forced into a single format.
-// Accepted: an optional leading "+", digits and common separators (space, dot, dash, parentheses), and an
-// optional extension ("x123", "ext 123", "ext. 123"). The main number must have 7-15 digits (E.164 max).
-const PHONE_PATTERN = /^\+?[\d\s().-]+?(?:\s*(?:x|ext\.?|extension)\s*\d{1,6})?$/i
-const PHONE_EXTENSION = /\s*(?:x|ext\.?|extension)\s*\d{1,6}$/i
+// Phones are stored in a single standard format:
+// - International numbers (written with "+" or the "00" prefix) as E.164: "+" and 8-15 digits, e.g. +14643128555.
+// - National numbers as digits only (7-15), e.g. 7311239702, since the lead's country is not reliable enough to
+//   infer the country calling code.
+// Input may use spaces, dashes and one pair of parentheses around the area code; they are stripped. Anything
+// else (extensions such as "x123", dots, letters, a "+" in the middle) makes the number invalid.
+const PHONE_FORMAT = /^\+?[\d\s-]*(?:\(\d{1,5}\)[\d\s-]*)?$/
 
-export const isValidPhoneNumber = (value: string): boolean => {
+// Returns the phone in the standard format, or null when it is not a valid phone number.
+export const normalizePhoneNumber = (value: string): string | null => {
   const phone = value.trim()
-  if (!PHONE_PATTERN.test(phone)) return false
-  const digits = phone.replace(PHONE_EXTENSION, '').replace(/\D/g, '')
-  return digits.length >= 7 && digits.length <= 15
+  if (!PHONE_FORMAT.test(phone)) return null
+
+  const digits = phone.replace(/\D/g, '')
+  if (phone.startsWith('+') || digits.startsWith('00')) {
+    const number = phone.startsWith('+') ? digits : digits.slice(2)
+    // Country calling codes never start with 0.
+    return number.length >= 8 && number.length <= 15 && !number.startsWith('0') ? `+${number}` : null
+  }
+  return digits.length >= 7 && digits.length <= 15 ? digits : null
 }
+
+export const isValidPhoneNumber = (value: string): boolean => normalizePhoneNumber(value) !== null
 
 export const MAX_YEARS_AT_COMPANY = 80
 

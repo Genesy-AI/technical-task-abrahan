@@ -29,22 +29,19 @@ describe('parseBulkLead', () => {
     const result = parseBulkLead({
       ...base,
       countryCode: 'es',
-      phoneNumber: ' +1-280-754-0462x2154 ',
+      phoneNumber: ' 001-464-312-8555 ',
       yearsAtCompany: '7',
       linkedinUrl: 'linkedin.com/in/jane-doe',
     })
     expect(result.data).toMatchObject({
       countryCode: 'ES',
-      phoneNumber: '+1-280-754-0462x2154',
+      phoneNumber: '+14643128555',
       yearsAtCompany: 7,
       linkedinUrl: 'https://www.linkedin.com/in/jane-doe',
     })
   })
 
   it('should reject the lead when an optional field is invalid', () => {
-    expect(parseBulkLead({ ...base, phoneNumber: 'call me' }).errors).toEqual([
-      'phoneNumber is not a valid phone number',
-    ])
     expect(parseBulkLead({ ...base, yearsAtCompany: -2 }).errors).toEqual([
       'yearsAtCompany must be a whole number between 0 and 80',
     ])
@@ -54,6 +51,14 @@ describe('parseBulkLead', () => {
     expect(parseBulkLead({ ...base, phoneNumber: 123456789 }).errors).toEqual([
       'phoneNumber must be a string',
     ])
+  })
+
+  it('should drop an invalid phone and still accept the lead', () => {
+    for (const phoneNumber of ['call me', '063.430.8860x4762']) {
+      const result = parseBulkLead({ ...base, phoneNumber })
+      expect(result.errors).toBeUndefined()
+      expect(result.data?.phoneNumber).toBeNull()
+    }
   })
 
   it('should report missing required fields', () => {

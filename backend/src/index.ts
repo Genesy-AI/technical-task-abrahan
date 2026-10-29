@@ -1,11 +1,16 @@
-import { PrismaClient } from '@prisma/client'
+import fs from 'fs'
 import express, { Request, Response } from 'express'
 import { Connection, Client } from '@temporalio/client'
 import { generateMessageFromTemplate, TEMPLATE_FIELDS } from './utils/messageGenerator'
 import { runTemporalWorker } from './worker'
 import { parseBulkLead } from './utils/bulkLead'
 import { verifyLeadEmails } from './services/verifyLeadEmails'
-const prisma = new PrismaClient()
+import { startPhoneEnrichment } from './services/enrichPhones'
+import { prisma } from './db'
+
+// Provider API keys live in backend/.env (see .env.sample).
+if (fs.existsSync('.env')) process.loadEnvFile()
+
 const app = express()
 app.use(express.json())
 
@@ -278,6 +283,52 @@ app.post('/leads/verify-emails', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Error verifying emails:', error)
     res.status(500).json({ error: 'Failed to verify emails' })
+  }
+})
+
+app.post('/leads/enrich-phone', async (req: Request, res: Response) => {
+  if (!req.body || typeof req.body !== 'object') {
+    return res.status(400).json({ error: 'Request body is required and must be valid JSON' })
+  }
+
+  const { leadIds } = req.body as { leadIds?: number[] }
+
+  if (!Array.isArray(leadIds) || leadIds.length === 0) {
+    return res.status(400).json({ error: 'leadIds must be a non-empty array' })
+  }
+
+  try {
+    const leads = await prisma.lead.findMany({
+      where: { id: { in: leadIds.map((id) => Number(id)) } },
+    })
+
+    if (leads.length === 0) {
+      return res.status(404).json({ error: 'No leads found with the provided IDs' })
+    }
+
+    const connection = await Connection.connect({ address: 'localhost:7233' })
+    const client = new Client({ connection, namespace: 'default' })
+
+    try {
+      // Workflows run in the background: progress is reported through the lead's phoneEnrichment* fields.
+      const result = await startPhoneEnrichment({
+        client,
+        taskQueue: 'myQueue',
+        leads,
+        setStatus: (leadId, status) =>
+          prisma.lead.update({
+            where: { id: leadId },
+            data: { phoneEnrichmentStatus: status, phoneEnrichmentProvider: null },
+          }),
+      })
+
+      res.json({ success: true, ...result })
+    } finally {
+      await connection.close()
+    }
+  } catch (error) {
+    console.error('Error starting phone enrichment:', error)
+    res.status(500).json({ error: 'Failed to start phone enrichment' })
   }
 })
 
