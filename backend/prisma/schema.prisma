@@ -19,4 +19,12 @@ model lead {
   companyName String?
   message     String?
   emailVerified Boolean?
+  phoneNumber    String?
+  yearsAtCompany Int?
+  linkedinUrl    String?
+  // Phone enrichment: PENDING | RUNNING | FOUND | NOT_FOUND | FAILED
+  phoneEnrichmentStatus   String?
+  // Provider being queried while RUNNING, or the one that found the phone when FOUND
+  phoneEnrichmentProvider String?
+  phoneEnrichedAt         DateTime?
 }

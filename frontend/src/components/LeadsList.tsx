@@ -1,9 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { FC, useState } from 'react'
+import { FC, useEffect, useRef, useState } from 'react'
 import toast from 'react-hot-toast'
 import { api } from '../api'
 import { MessageTemplateModal } from './MessageTemplateModal'
 import { CsvImportModal } from './CsvImportModal'
+import { runWithConcurrency } from '../utils/concurrency'
+import { PhoneCell } from './PhoneCell'
+import { isPhoneEnrichmentInProgress } from '../utils/phoneProviders'
+
+const VERIFY_EMAILS_CONCURRENCY = 5
+const ENRICHMENT_POLL_INTERVAL_MS = 2000
 
 export const LeadsList: FC = () => {
   const [selectedLeads, setSelectedLeads] = useState<number[]>([])
@@ -16,7 +22,68 @@ export const LeadsList: FC = () => {
     queryKey: ['leads', 'getMany'],
     queryFn: async () => api.leads.getMany(),
     retry: false,
+    // Phone enrichment runs in the background, so poll while any lead is still being enriched.
+    refetchInterval: (query) =>
+      query.state.data?.some((lead) => isPhoneEnrichmentInProgress(lead.phoneEnrichmentStatus))
+        ? ENRICHMENT_POLL_INTERVAL_MS
+        : false,
   })
+
+  // Leads whose enrichment was started from this page, used to report progress in a single toast.
+  const enrichingLeadIds = useRef(new Set<number>())
+  const enrichToastId = useRef<string>()
+
+  const enrichPhoneMutation = useMutation({
+    mutationFn: async (ids: number[]) => api.leads.enrichPhone({ leadIds: ids }),
+    onSuccess: async (data) => {
+      setIsEnrichDropdownOpen(false)
+      if (data.skipped.length > 0) {
+        toast(
+          `Skipped ${data.skipped.length}: ${data.skipped.map((lead) => `${lead.leadName} (${lead.reason})`).join(', ')}`,
+          { icon: 'ℹ️' }
+        )
+      }
+      if (data.started.length === 0) return
+
+      // Wait for fresh data (now PENDING) before tracking, so statuses from a previous run are not counted as done.
+      await queryClient.invalidateQueries({ queryKey: ['leads', 'getMany'] })
+      data.started.forEach((id) => enrichingLeadIds.current.add(id))
+      enrichToastId.current = toast.loading(`Finding phone numbers... 0/${enrichingLeadIds.current.size}`, {
+        id: enrichToastId.current,
+      })
+    },
+    onError: () => {
+      toast.error('Failed to start phone enrichment. Please try again.')
+    },
+  })
+
+  useEffect(() => {
+    const tracked = leads.data?.filter((lead) => enrichingLeadIds.current.has(lead.id))
+    if (!tracked || enrichingLeadIds.current.size === 0) return
+
+    // Leads deleted while being enriched no longer show up in the list and are simply not counted.
+    const total = tracked.length
+    if (total === 0) {
+      toast.dismiss(enrichToastId.current)
+      enrichingLeadIds.current.clear()
+      return
+    }
+    const done = tracked.filter((lead) => !isPhoneEnrichmentInProgress(lead.phoneEnrichmentStatus))
+    if (done.length < total) {
+      toast.loading(`Finding phone numbers... ${done.length}/${total}`, { id: enrichToastId.current })
+      return
+    }
+
+    const count = (status: string) => done.filter((lead) => lead.phoneEnrichmentStatus === status).length
+    const summary = `Phone enrichment finished: ${count('FOUND')} found, ${count('NOT_FOUND')} no data found, ${count('FAILED')} failed`
+    if (count('FAILED') > 0) {
+      toast.error(summary, { id: enrichToastId.current })
+    } else {
+      toast.success(summary, { id: enrichToastId.current })
+    }
+    enrichingLeadIds.current.clear()
+    enrichToastId.current = undefined
+  }, [leads.data])
   
 
   const deleteLeadsMutation = useMutation({
@@ -35,20 +102,41 @@ export const LeadsList: FC = () => {
     }
   })
 
+  // Leads are verified one request each so the toast can report progress as results come in.
   const verifyEmailsMutation = useMutation({
-    mutationFn: async (ids: number[]) => api.leads.verifyEmails({ leadIds: ids }),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['leads', 'getMany'] })
+    mutationFn: async (ids: number[]) => {
+      const toastId = toast.loading(`Verifying emails... 0/${ids.length}`)
       setIsEnrichDropdownOpen(false)
-      toast.success(
-        data.verifiedCount === 1
-          ? `Verified ${data.verifiedCount} email`
-          : `Verified ${data.verifiedCount} emails`
-      )
+      let completed = 0
+      let validCount = 0
+      let invalidCount = 0
+      const failedLeads: string[] = []
+
+      await runWithConcurrency(ids, VERIFY_EMAILS_CONCURRENCY, async (id) => {
+        try {
+          const data = await api.leads.verifyEmails({ leadIds: [id] })
+          data.results.forEach((result) => (result.emailVerified ? validCount++ : invalidCount++))
+          data.errors.forEach((error) => failedLeads.push(error.leadName))
+        } catch {
+          const lead = leads.data?.find((lead) => lead.id === id)
+          failedLeads.push(lead ? `${lead.firstName} ${lead.lastName ?? ''}`.trim() : `Lead #${id}`)
+        }
+        completed++
+        toast.loading(`Verifying emails... ${completed}/${ids.length}`, { id: toastId })
+        queryClient.invalidateQueries({ queryKey: ['leads', 'getMany'] })
+      })
+
+      return { toastId, total: ids.length, validCount, invalidCount, failedLeads }
     },
-    onError: () => {
-      toast.error('Failed to verify emails. Please try again.')
-    }
+    // "Checked" counts emails whose verification finished; whether each email is valid is reported separately.
+    onSuccess: ({ toastId, total, validCount, invalidCount, failedLeads }) => {
+      const summary = `Checked ${validCount + invalidCount}/${total} ${total === 1 ? 'email' : 'emails'}: ${validCount} valid, ${invalidCount} invalid`
+      if (failedLeads.length === 0) {
+        toast.success(summary, { id: toastId })
+      } else {
+        toast.error(`${summary}. Failed: ${failedLeads.join(', ')}`, { id: toastId })
+      }
+    },
   })
 
   const handleSelectAll = (checked: boolean) => {
@@ -149,13 +237,26 @@ export const LeadsList: FC = () => {
                     </button>
                     <button
                       onClick={() => verifyEmailsMutation.mutate(selectedLeads)}
-                      className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors"
+                      disabled={verifyEmailsMutation.isPending}
+                      className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <div className="flex items-center">
                         <svg className="mr-3 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 12H8m8 0a8 8 0 11-16 0 8 8 0 0116 0zm-8 0V4" />
                         </svg>
                         Verify Email
+                      </div>
+                    </button>
+                    <button
+                      onClick={() => enrichPhoneMutation.mutate(selectedLeads)}
+                      disabled={enrichPhoneMutation.isPending}
+                      className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <div className="flex items-center">
+                        <svg className="mr-3 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                        </svg>
+                        Enrich Phone
                       </div>
                     </button>
                     <button
@@ -235,6 +336,15 @@ export const LeadsList: FC = () => {
                   Country
                 </th>
                 <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">
+                  Phone
+                </th>
+                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">
+                  Years at Company
+                </th>
+                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">
+                  LinkedIn
+                </th>
+                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">
                   Message
                 </th>
                 <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider bg-gray-50">
@@ -274,6 +384,31 @@ export const LeadsList: FC = () => {
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap">
                     <div className="text-sm text-gray-900">{lead.countryCode || '-'}</div>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    <PhoneCell
+                      phoneNumber={lead.phoneNumber}
+                      status={lead.phoneEnrichmentStatus}
+                      provider={lead.phoneEnrichmentProvider}
+                    />
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    <div className="text-sm text-gray-900">{lead.yearsAtCompany ?? '-'}</div>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    {lead.linkedinUrl ? (
+                      <a
+                        href={lead.linkedinUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-sm text-blue-600 hover:underline"
+                        title={lead.linkedinUrl}
+                      >
+                        Profile
+                      </a>
+                    ) : (
+                      <div className="text-sm text-gray-900">-</div>
+                    )}
                   </td>
                   <td className="px-6 py-4">
                     <div className="text-sm text-gray-900 max-w-xs truncate" title={lead.message || ''}>

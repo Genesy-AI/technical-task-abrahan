@@ -1,6 +1,6 @@
-import { FC, useState, useEffect, useCallback, useRef } from 'react'
+import { FC, useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import toast from 'react-hot-toast'
 import { api } from '../api'
 
@@ -18,6 +18,7 @@ export const MessageTemplateModal: FC<MessageTemplateModalProps> = ({
   selectedLeadsCount,
 }) => {
   const [template, setTemplate] = useState('')
+  const [fieldSearch, setFieldSearch] = useState('')
   const [generationResult, setGenerationResult] = useState<{
     success: boolean
     generatedCount: number
@@ -74,6 +75,7 @@ export const MessageTemplateModal: FC<MessageTemplateModalProps> = ({
     if (!generateMessagesMutation.isPending) {
       onClose()
       setTemplate('')
+      setFieldSearch('')
       setGenerationResult(null)
     }
   }, [generateMessagesMutation.isPending, onClose])
@@ -106,7 +108,36 @@ export const MessageTemplateModal: FC<MessageTemplateModalProps> = ({
     }
   }, [isOpen, handleClose])
 
-  const availableFields = ['firstName', 'lastName', 'email', 'jobTitle', 'companyName', 'countryCode']
+  // The field list comes from the backend so new lead fields show up here without frontend changes.
+  const templateFields = useQuery({
+    queryKey: ['leads', 'templateFields'],
+    queryFn: async () => api.leads.templateFields(),
+    enabled: isOpen,
+    staleTime: Infinity,
+  })
+
+  const fieldGroups = useMemo(() => {
+    const search = fieldSearch.trim().toLowerCase()
+    const groups = new Map<string, NonNullable<typeof templateFields.data>>()
+    for (const field of templateFields.data ?? []) {
+      if (
+        search &&
+        !field.label.toLowerCase().includes(search) &&
+        !field.key.toLowerCase().includes(search)
+      ) {
+        continue
+      }
+      groups.set(field.group, [...(groups.get(field.group) ?? []), field])
+    }
+    return Array.from(groups.entries())
+  }, [templateFields.data, fieldSearch])
+
+  const unknownFields = useMemo(() => {
+    if (!templateFields.data) return []
+    const known = new Set(templateFields.data.map((field) => field.key))
+    const used = Array.from(template.matchAll(/\{(\w+)\}/g), (match) => match[1])
+    return Array.from(new Set(used.filter((key) => !known.has(key))))
+  }, [template, templateFields.data])
 
   const insertField = (field: string) => {
     if (textareaRef.current) {
@@ -156,18 +187,46 @@ export const MessageTemplateModal: FC<MessageTemplateModalProps> = ({
                 Message Template
               </label>
               <div className="space-y-3">
-                <div className="flex flex-wrap gap-2">
-                  <span className="text-sm text-gray-600">Insert field:</span>
-                  {availableFields.map((field) => (
-                    <button
-                      key={field}
-                      type="button"
-                      onClick={() => insertField(field)}
-                      className="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded hover:bg-blue-200 transition-colors"
-                    >
-                      {`{${field}}`}
-                    </button>
-                  ))}
+                <div className="border border-gray-200 rounded-md">
+                  <div className="p-2 border-b border-gray-200">
+                    <input
+                      type="search"
+                      value={fieldSearch}
+                      onChange={(e) => setFieldSearch(e.target.value)}
+                      placeholder="Search fields to insert..."
+                      aria-label="Search fields"
+                      className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div className="max-h-40 overflow-y-auto p-2 space-y-2">
+                    {templateFields.isLoading && <p className="text-sm text-gray-500">Loading fields...</p>}
+                    {templateFields.isError && (
+                      <p className="text-sm text-red-600">
+                        Could not load fields. You can still type {`{fieldName}`}.
+                      </p>
+                    )}
+                    {templateFields.isSuccess && fieldGroups.length === 0 && (
+                      <p className="text-sm text-gray-500">No fields match "{fieldSearch}"</p>
+                    )}
+                    {fieldGroups.map(([group, fields]) => (
+                      <div key={group}>
+                        <div className="text-xs font-medium text-gray-500 uppercase mb-1">{group}</div>
+                        <div className="flex flex-wrap gap-2">
+                          {fields.map((field) => (
+                            <button
+                              key={field.key}
+                              type="button"
+                              onClick={() => insertField(field.key)}
+                              title={`Insert {${field.key}}`}
+                              className="px-2 py-1 text-xs bg-blue-100 text-blue-800 rounded hover:bg-blue-200 transition-colors"
+                            >
+                              {field.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
                 <textarea
                   ref={textareaRef}
@@ -179,6 +238,12 @@ export const MessageTemplateModal: FC<MessageTemplateModalProps> = ({
                   required
                 />
               </div>
+              {unknownFields.length > 0 && (
+                <p className="mt-2 text-sm text-red-600">
+                  Unknown field{unknownFields.length !== 1 ? 's' : ''}:{' '}
+                  {unknownFields.map((key) => `{${key}}`).join(', ')}
+                </p>
+              )}
               <p className="mt-2 text-sm text-gray-500">
                 Use curly braces around field names (e.g., {`{firstName}`}) to insert dynamic values. If a
                 field is missing for a lead, an error will be shown and no message will be generated for that
@@ -259,7 +324,9 @@ export const MessageTemplateModal: FC<MessageTemplateModalProps> = ({
               {(!generationResult || generationResult.errors.length > 0) && (
                 <button
                   type="submit"
-                  disabled={!template.trim() || generateMessagesMutation.isPending}
+                  disabled={
+                    !template.trim() || unknownFields.length > 0 || generateMessagesMutation.isPending
+                  }
                   className="px-4 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   {generateMessagesMutation.isPending ? (

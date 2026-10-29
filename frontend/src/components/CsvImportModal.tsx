@@ -100,6 +100,9 @@ export const CsvImportModal: FC<CsvImportModalProps> = ({ isOpen, onClose }) => 
         jobTitle: lead.jobTitle || undefined,
         countryCode: lead.countryCode || undefined,
         companyName: lead.companyName || undefined,
+        phoneNumber: lead.phoneNumber || undefined,
+        yearsAtCompany: lead.yearsAtCompany,
+        linkedinUrl: lead.linkedinUrl || undefined,
       }))
 
       return api.leads.bulkImport({ leads: leadsToImport })
@@ -238,7 +241,7 @@ export const CsvImportModal: FC<CsvImportModalProps> = ({ isOpen, onClose }) => 
                   </p>
                   <p className="text-sm text-gray-500">
                     CSV must include: firstName, lastName, email (required). Optional: jobTitle, countryCode,
-                    companyName
+                    companyName, phoneNumber, yearsAtCompany, linkedinUrl
                   </p>
                 </div>
               )}
@@ -285,7 +288,16 @@ export const CsvImportModal: FC<CsvImportModalProps> = ({ isOpen, onClose }) => 
                         Company
                       </th>
                       <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">
-                        Errors
+                        Phone
+                      </th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">
+                        Years
+                      </th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">
+                        LinkedIn
+                      </th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">
+                        Issues
                       </th>
                     </tr>
                   </thead>
@@ -309,7 +321,23 @@ export const CsvImportModal: FC<CsvImportModalProps> = ({ isOpen, onClose }) => 
                         </td>
                         <td className="px-3 py-2 text-sm text-gray-900">{lead.email || '-'}</td>
                         <td className="px-3 py-2 text-sm text-gray-900">{lead.companyName || '-'}</td>
-                        <td className="px-3 py-2 text-sm text-red-600">{lead.errors.join(', ') || '-'}</td>
+                        <td className="px-3 py-2 text-sm text-gray-900 whitespace-nowrap">
+                          {lead.phoneNumber || '-'}
+                        </td>
+                        <td className="px-3 py-2 text-sm text-gray-900">{lead.yearsAtCompany ?? '-'}</td>
+                        <td
+                          className="px-3 py-2 text-sm text-gray-900 max-w-[12rem] truncate"
+                          title={lead.linkedinUrl}
+                        >
+                          {lead.linkedinUrl || '-'}
+                        </td>
+                        <td className="px-3 py-2 text-sm">
+                          {lead.errors.length === 0 && lead.warnings.length === 0 && '-'}
+                          {lead.errors.length > 0 && <div className="text-red-600">{lead.errors.join(', ')}</div>}
+                          {lead.warnings.length > 0 && (
+                            <div className="text-amber-600">{lead.warnings.join(', ')}</div>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

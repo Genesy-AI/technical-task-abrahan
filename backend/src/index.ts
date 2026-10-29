@@ -1,10 +1,16 @@
-import { PrismaClient } from '@prisma/client'
+import fs from 'fs'
 import express, { Request, Response } from 'express'
 import { Connection, Client } from '@temporalio/client'
-import { verifyEmailWorkflow } from './workflows'
-import { generateMessageFromTemplate } from './utils/messageGenerator'
+import { generateMessageFromTemplate, TEMPLATE_FIELDS } from './utils/messageGenerator'
 import { runTemporalWorker } from './worker'
-const prisma = new PrismaClient()
+import { parseBulkLead } from './utils/bulkLead'
+import { verifyLeadEmails } from './services/verifyLeadEmails'
+import { startPhoneEnrichment } from './services/enrichPhones'
+import { prisma } from './db'
+
+// Provider API keys live in backend/.env (see .env.sample).
+if (fs.existsSync('.env')) process.loadEnvFile()
+
 const app = express()
 app.use(express.json())
 
@@ -36,6 +42,11 @@ app.post('/leads', async (req: Request, res: Response) => {
     },
   })
   res.json(lead)
+})
+
+// Must be registered before /leads/:id so "template-fields" is not taken as an id.
+app.get('/leads/template-fields', (_req: Request, res: Response) => {
+  res.json(TEMPLATE_FIELDS)
 })
 
 app.get('/leads/:id', async (req: Request, res: Response) => {
@@ -179,30 +190,19 @@ app.post('/leads/bulk', async (req: Request, res: Response) => {
   }
 
   try {
-    const validLeads = leads.filter((lead) => {
-      return (
-        lead.firstName &&
-        lead.lastName &&
-        lead.email &&
-        typeof lead.firstName === 'string' &&
-        lead.firstName.trim() &&
-        typeof lead.lastName === 'string' &&
-        lead.lastName.trim() &&
-        typeof lead.email === 'string' &&
-        lead.email.trim()
-      )
-    })
+    const validLeads = leads.flatMap((lead) => parseBulkLead(lead).data ?? [])
 
     if (validLeads.length === 0) {
-      return res
-        .status(400)
-        .json({ error: 'No valid leads found. firstName, lastName, and email are required.' })
+      return res.status(400).json({
+        error:
+          'No valid leads found. firstName, lastName, and email are required, and optional fields (countryCode, phoneNumber, yearsAtCompany, linkedinUrl) must be valid when present.',
+      })
     }
 
     const existingLeads = await prisma.lead.findMany({
       where: {
         OR: validLeads.map((lead) => ({
-          AND: [{ firstName: lead.firstName.trim() }, { lastName: lead.lastName.trim() }],
+          AND: [{ firstName: lead.firstName }, { lastName: lead.lastName }],
         })),
       },
     })
@@ -221,16 +221,7 @@ app.post('/leads/bulk', async (req: Request, res: Response) => {
 
     for (const lead of uniqueLeads) {
       try {
-        await prisma.lead.create({
-          data: {
-            firstName: lead.firstName.trim(),
-            lastName: lead.lastName.trim(),
-            email: lead.email.trim(),
-            jobTitle: lead.jobTitle ? lead.jobTitle.trim() : null,
-            countryCode: lead.countryCode ? lead.countryCode.trim() : null,
-            companyName: lead.companyName ? lead.companyName.trim() : null,
-          },
-        })
+        await prisma.lead.create({ data: lead })
         importedCount++
       } catch (error) {
         errors.push({
@@ -276,40 +267,68 @@ app.post('/leads/verify-emails', async (req: Request, res: Response) => {
     const connection = await Connection.connect({ address: 'localhost:7233' })
     const client = new Client({ connection, namespace: 'default' })
 
-    let verifiedCount = 0
-    const results: Array<{ leadId: number; emailVerified: boolean }> = []
-    const errors: Array<{ leadId: number; leadName: string; error: string }> = []
+    try {
+      const { results, errors } = await verifyLeadEmails({
+        client,
+        taskQueue: 'myQueue',
+        leads,
+        saveResult: (leadId, emailVerified) =>
+          prisma.lead.update({ where: { id: leadId }, data: { emailVerified } }),
+      })
 
-    for (const lead of leads) {
-      try {
-        const isVerified = await client.workflow.execute(verifyEmailWorkflow, {
-          taskQueue: 'myQueue',
-          workflowId: `verify-email-${lead.id}-${Date.now()}`,
-          args: [lead.email],
-        })
-
-        await prisma.lead.update({
-          where: { id: lead.id },
-          data: { emailVerified: Boolean(isVerified) },
-        })
-
-        results.push({ leadId: lead.id, emailVerified: isVerified })
-        verifiedCount += 1
-      } catch (error) {
-        errors.push({
-          leadId: lead.id,
-          leadName: `${lead.firstName} ${lead.lastName}`.trim(),
-          error: error instanceof Error ? error.message : 'Unknown error',
-        })
-      }
+      res.json({ success: true, verifiedCount: results.length, results, errors })
+    } finally {
+      await connection.close()
     }
-
-    await connection.close()
-
-    res.json({ success: true, verifiedCount, results, errors })
   } catch (error) {
     console.error('Error verifying emails:', error)
     res.status(500).json({ error: 'Failed to verify emails' })
+  }
+})
+
+app.post('/leads/enrich-phone', async (req: Request, res: Response) => {
+  if (!req.body || typeof req.body !== 'object') {
+    return res.status(400).json({ error: 'Request body is required and must be valid JSON' })
+  }
+
+  const { leadIds } = req.body as { leadIds?: number[] }
+
+  if (!Array.isArray(leadIds) || leadIds.length === 0) {
+    return res.status(400).json({ error: 'leadIds must be a non-empty array' })
+  }
+
+  try {
+    const leads = await prisma.lead.findMany({
+      where: { id: { in: leadIds.map((id) => Number(id)) } },
+    })
+
+    if (leads.length === 0) {
+      return res.status(404).json({ error: 'No leads found with the provided IDs' })
+    }
+
+    const connection = await Connection.connect({ address: 'localhost:7233' })
+    const client = new Client({ connection, namespace: 'default' })
+
+    try {
+      // Workflows run in the background: progress is reported through the lead's phoneEnrichment* fields.
+      const result = await startPhoneEnrichment({
+        client,
+        taskQueue: 'myQueue',
+        leads,
+        setStatus: (leadId, status) =>
+          prisma.lead.update({
+            where: { id: leadId },
+            data: { phoneEnrichmentStatus: status, phoneEnrichmentProvider: null },
+          }),
+      })
+
+      res.json({ success: true, ...result })
+    } finally {
+      await connection.close()
+    }
+  } catch (error) {
+    console.error('Error starting phone enrichment:', error)
+    res.status(500).json({ error: 'Failed to start phone enrichment' })
   }
 })
 

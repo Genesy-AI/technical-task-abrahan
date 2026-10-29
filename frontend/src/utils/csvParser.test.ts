@@ -66,6 +66,7 @@ John,Doe,john.doe@example.com,Developer,US,Tech Corp`
       companyName: 'Tech Corp',
       isValid: true,
       errors: [],
+      warnings: [],
       rowIndex: 2,
     })
   })
@@ -154,6 +155,30 @@ John,Doe,john@example.com,,`
     expect(result[0].isValid).toBe(true)
   })
 
+  it('should normalize country codes to uppercase', () => {
+    const csv = `firstName,lastName,email,countryCode
+John,Doe,john@example.com, es `
+
+    const result = parseCsv(csv)
+
+    expect(result[0].countryCode).toBe('ES')
+    expect(result[0].isValid).toBe(true)
+  })
+
+  it('should mark rows with invalid country codes as invalid', () => {
+    const csv = `firstName,lastName,email,countryCode
+John,Doe,john@example.com,XXX
+Jane,Smith,jane@example.com,12
+Bob,Brown,bob@example.com,UK
+Ann,Lee,ann@example.com,GB`
+
+    const result = parseCsv(csv)
+
+    expect(result.map((lead) => lead.isValid)).toEqual([false, false, false, true])
+    expect(result[0].errors).toContain('Invalid country code "XXX" (expected ISO 3166-1 alpha-2, e.g. US)')
+    expect(result[2].errors).toContain('Invalid country code "UK" (expected ISO 3166-1 alpha-2, e.g. US)')
+  })
+
   it('should preserve row index correctly', () => {
     const csv = `firstName,lastName,email
 John,Doe,john@example.com
@@ -222,5 +247,68 @@ Jane,Johnson,jane@example.com`
     expect(result[0].lastName).toBe('Doe')
     expect(result[0].email).toBe('john@example.com')
     expect(result[0].isValid).toBe(true)
+  })
+
+  describe('new lead fields', () => {
+    it('should parse the columns used by the sample CSVs (yearsInRole, phoneNumber)', () => {
+      const csv = `firstName,lastName,email,jobTitle,countryCode,companyName,yearsInRole,phoneNumber
+Chad,Smith,chad@example.com,Engineer,TV,Global Tech,2,001-464-312-8555`
+
+      const [lead] = parseCsv(csv)
+
+      expect(lead.isValid).toBe(true)
+      expect(lead.yearsAtCompany).toBe(2)
+      expect(lead.phoneNumber).toBe('+14643128555')
+    })
+
+    it('should parse and normalize a LinkedIn profile URL', () => {
+      const csv = `firstName,lastName,email,yearsAtCompany,linkedinUrl
+Jane,Doe,jane@example.com,0,linkedin.com/in/jane-doe`
+
+      const [lead] = parseCsv(csv)
+
+      expect(lead.isValid).toBe(true)
+      expect(lead.yearsAtCompany).toBe(0)
+      expect(lead.linkedinUrl).toBe('https://www.linkedin.com/in/jane-doe')
+    })
+
+    it('should keep the row valid when the new optional fields are empty', () => {
+      const csv = `firstName,lastName,email,phoneNumber,yearsAtCompany,linkedinUrl
+Jane,Doe,jane@example.com,,,`
+
+      const [lead] = parseCsv(csv)
+
+      expect(lead.isValid).toBe(true)
+      expect(lead.phoneNumber).toBeUndefined()
+      expect(lead.yearsAtCompany).toBeUndefined()
+      expect(lead.linkedinUrl).toBeUndefined()
+    })
+
+    it('should mark the row invalid when a new field is invalid', () => {
+      const csv = `firstName,lastName,email,phoneNumber,yearsAtCompany,linkedinUrl
+Jane,Doe,jane@example.com,(731)123-9702,2.5,https://example.com/jane`
+
+      const [lead] = parseCsv(csv)
+
+      expect(lead.isValid).toBe(false)
+      expect(lead.errors).toEqual([
+        'Invalid years at company "2.5" (expected a whole number between 0 and 80)',
+        'Invalid LinkedIn URL "https://example.com/jane" (expected linkedin.com/in/...)',
+      ])
+    })
+
+    it('should discard an invalid phone with a warning but keep the row valid', () => {
+      const csv = `firstName,lastName,email,phoneNumber
+Jane,Doe,jane@example.com,063.430.8860x4762
+John,Roe,john@example.com,(731)123-9702`
+
+      const [discarded, normalized] = parseCsv(csv)
+
+      expect(discarded.isValid).toBe(true)
+      expect(discarded.phoneNumber).toBeUndefined()
+      expect(discarded.warnings).toEqual(['Phone "063.430.8860x4762" discarded (invalid format)'])
+      expect(normalized.phoneNumber).toBe('7311239702')
+      expect(normalized.warnings).toEqual([])
+    })
   })
 })
