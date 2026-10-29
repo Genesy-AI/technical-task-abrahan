@@ -4,6 +4,9 @@ import toast from 'react-hot-toast'
 import { api } from '../api'
 import { MessageTemplateModal } from './MessageTemplateModal'
 import { CsvImportModal } from './CsvImportModal'
+import { runWithConcurrency } from '../utils/concurrency'
+
+const VERIFY_EMAILS_CONCURRENCY = 5
 
 export const LeadsList: FC = () => {
   const [selectedLeads, setSelectedLeads] = useState<number[]>([])
@@ -35,20 +38,41 @@ export const LeadsList: FC = () => {
     }
   })
 
+  // Leads are verified one request each so the toast can report progress as results come in.
   const verifyEmailsMutation = useMutation({
-    mutationFn: async (ids: number[]) => api.leads.verifyEmails({ leadIds: ids }),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ['leads', 'getMany'] })
+    mutationFn: async (ids: number[]) => {
+      const toastId = toast.loading(`Verifying emails... 0/${ids.length}`)
       setIsEnrichDropdownOpen(false)
-      toast.success(
-        data.verifiedCount === 1
-          ? `Verified ${data.verifiedCount} email`
-          : `Verified ${data.verifiedCount} emails`
-      )
+      let completed = 0
+      let validCount = 0
+      let invalidCount = 0
+      const failedLeads: string[] = []
+
+      await runWithConcurrency(ids, VERIFY_EMAILS_CONCURRENCY, async (id) => {
+        try {
+          const data = await api.leads.verifyEmails({ leadIds: [id] })
+          data.results.forEach((result) => (result.emailVerified ? validCount++ : invalidCount++))
+          data.errors.forEach((error) => failedLeads.push(error.leadName))
+        } catch {
+          const lead = leads.data?.find((lead) => lead.id === id)
+          failedLeads.push(lead ? `${lead.firstName} ${lead.lastName ?? ''}`.trim() : `Lead #${id}`)
+        }
+        completed++
+        toast.loading(`Verifying emails... ${completed}/${ids.length}`, { id: toastId })
+        queryClient.invalidateQueries({ queryKey: ['leads', 'getMany'] })
+      })
+
+      return { toastId, total: ids.length, validCount, invalidCount, failedLeads }
     },
-    onError: () => {
-      toast.error('Failed to verify emails. Please try again.')
-    }
+    // "Checked" counts emails whose verification finished; whether each email is valid is reported separately.
+    onSuccess: ({ toastId, total, validCount, invalidCount, failedLeads }) => {
+      const summary = `Checked ${validCount + invalidCount}/${total} ${total === 1 ? 'email' : 'emails'}: ${validCount} valid, ${invalidCount} invalid`
+      if (failedLeads.length === 0) {
+        toast.success(summary, { id: toastId })
+      } else {
+        toast.error(`${summary}. Failed: ${failedLeads.join(', ')}`, { id: toastId })
+      }
+    },
   })
 
   const handleSelectAll = (checked: boolean) => {
@@ -149,7 +173,8 @@ export const LeadsList: FC = () => {
                     </button>
                     <button
                       onClick={() => verifyEmailsMutation.mutate(selectedLeads)}
-                      className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors"
+                      disabled={verifyEmailsMutation.isPending}
+                      className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       <div className="flex items-center">
                         <svg className="mr-3 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
