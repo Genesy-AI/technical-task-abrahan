@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { getErrorMessage, TimeoutError, withTimeout } from './async'
 
 describe('withTimeout', () => {
@@ -7,8 +7,15 @@ describe('withTimeout', () => {
   })
 
   it('should reject with TimeoutError when the promise takes too long', async () => {
-    const slow = new Promise((resolve) => setTimeout(resolve, 200))
-    await expect(withTimeout(slow, 10)).rejects.toBeInstanceOf(TimeoutError)
+    vi.useFakeTimers()
+    try {
+      const never = new Promise(() => {})
+      const result = expect(withTimeout(never, 10)).rejects.toBeInstanceOf(TimeoutError)
+      await vi.advanceTimersByTimeAsync(10)
+      await result
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('should propagate the original rejection', async () => {

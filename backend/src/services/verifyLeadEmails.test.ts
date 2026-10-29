@@ -40,7 +40,9 @@ const lead = (id: number, email: string): LeadToVerify => ({
   email,
 })
 
-describe('verifyLeadEmails', { timeout: 30_000 }, () => {
+// These tests wait in real time (retry backoff, workflow timeouts) and boot a Temporal test server, so they are
+// skipped by default. Run them with RUN_SLOW_TESTS=1 pnpm test.
+describe.skipIf(!process.env.RUN_SLOW_TESTS)('verifyLeadEmails', { timeout: 30_000 }, () => {
   let testEnv: TestWorkflowEnvironment
   let worker: Worker
   let workerRun: Promise<void>

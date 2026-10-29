@@ -247,4 +247,54 @@ Jane,Johnson,jane@example.com`
     expect(result[0].email).toBe('john@example.com')
     expect(result[0].isValid).toBe(true)
   })
+
+  describe('new lead fields', () => {
+    it('should parse the columns used by the sample CSVs (yearsInRole, phoneNumber)', () => {
+      const csv = `firstName,lastName,email,jobTitle,countryCode,companyName,yearsInRole,phoneNumber
+Chad,Smith,chad@example.com,Engineer,TV,Global Tech,2,+1-280-754-0462x2154`
+
+      const [lead] = parseCsv(csv)
+
+      expect(lead.isValid).toBe(true)
+      expect(lead.yearsAtCompany).toBe(2)
+      expect(lead.phoneNumber).toBe('+1-280-754-0462x2154')
+    })
+
+    it('should parse and normalize a LinkedIn profile URL', () => {
+      const csv = `firstName,lastName,email,yearsAtCompany,linkedinUrl
+Jane,Doe,jane@example.com,0,linkedin.com/in/jane-doe`
+
+      const [lead] = parseCsv(csv)
+
+      expect(lead.isValid).toBe(true)
+      expect(lead.yearsAtCompany).toBe(0)
+      expect(lead.linkedinUrl).toBe('https://www.linkedin.com/in/jane-doe')
+    })
+
+    it('should keep the row valid when the new optional fields are empty', () => {
+      const csv = `firstName,lastName,email,phoneNumber,yearsAtCompany,linkedinUrl
+Jane,Doe,jane@example.com,,,`
+
+      const [lead] = parseCsv(csv)
+
+      expect(lead.isValid).toBe(true)
+      expect(lead.phoneNumber).toBeUndefined()
+      expect(lead.yearsAtCompany).toBeUndefined()
+      expect(lead.linkedinUrl).toBeUndefined()
+    })
+
+    it('should mark the row invalid when a new field is invalid', () => {
+      const csv = `firstName,lastName,email,phoneNumber,yearsAtCompany,linkedinUrl
+Jane,Doe,jane@example.com,call me,2.5,https://example.com/jane`
+
+      const [lead] = parseCsv(csv)
+
+      expect(lead.isValid).toBe(false)
+      expect(lead.errors).toEqual([
+        'Invalid phone number "call me"',
+        'Invalid years at company "2.5" (expected a whole number between 0 and 80)',
+        'Invalid LinkedIn URL "https://example.com/jane" (expected linkedin.com/in/...)',
+      ])
+    })
+  })
 })

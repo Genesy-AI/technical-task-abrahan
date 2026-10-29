@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { generateMessageFromTemplate, Lead } from './messageGenerator'
+import { generateMessageFromTemplate, Lead, TEMPLATE_FIELDS } from './messageGenerator'
 
 describe('generateMessageFromTemplate', () => {
   const fullLead: Lead = {
@@ -204,6 +204,37 @@ describe('generateMessageFromTemplate', () => {
       const template = 'Hi {firstName} from {companyName}!'
       const result = generateMessageFromTemplate(template, emojiLead)
       expect(result).toBe('Hi John 😊 from TechCorp 🚀!')
+    })
+  })
+
+  describe('new lead fields', () => {
+    const lead: Lead = {
+      firstName: 'Jane',
+      phoneNumber: '+1-280-754-0462',
+      yearsAtCompany: 0,
+      linkedinUrl: 'https://www.linkedin.com/in/jane-doe',
+    }
+
+    it('should replace phone, years at company (including 0) and LinkedIn fields', () => {
+      expect(
+        generateMessageFromTemplate('{firstName}: {phoneNumber}, {yearsAtCompany} years, {linkedinUrl}', lead)
+      ).toBe('Jane: +1-280-754-0462, 0 years, https://www.linkedin.com/in/jane-doe')
+    })
+
+    it('should throw when a new field is missing on the lead', () => {
+      expect(() => generateMessageFromTemplate('{phoneNumber}', { firstName: 'Jane' })).toThrow(
+        'Missing required field: phoneNumber'
+      )
+    })
+
+    it('should not interpret $ sequences in field values', () => {
+      expect(generateMessageFromTemplate('Hi {firstName}', { firstName: "$& $' $1" })).toBe("Hi $& $' $1")
+    })
+
+    it('should expose every template field as a lead property', () => {
+      expect(TEMPLATE_FIELDS.map((field) => field.key)).toEqual(
+        expect.arrayContaining(['phoneNumber', 'yearsAtCompany', 'linkedinUrl'])
+      )
     })
   })
 })
